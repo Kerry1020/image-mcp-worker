@@ -170,6 +170,15 @@ export default {
         return jsonResponse({ error: "invalid image URL format" }, 404);
       }
       const imgId = match[1];
+
+      // Support ?format=b64 to get base64 JSON instead of raw PNG
+      if (url.searchParams.get("format") === "b64") {
+        if (!env.IMAGE_KV) return jsonResponse({ error: "KV not configured" }, 500);
+        const b64 = await env.IMAGE_KV.get(imgId);
+        if (!b64) return jsonResponse({ error: "image not found or expired" }, 404);
+        return jsonResponse({ id: imgId, mime_type: "image/png", data: b64 });
+      }
+
       if (!env.IMAGE_KV) {
         return jsonResponse({ error: "KV not configured" }, 500);
       }
@@ -200,10 +209,14 @@ export default {
       return jsonResponse({
         ok: true,
         name: "image-mcp-worker",
-        version: "2.0.0",
+        version: "2.1.0",
         tools: ["generate_image"],
         protocol: "MCP Streamable HTTP",
-        features: ["KV image storage with direct download URLs"],
+        endpoints: {
+          mcp: "POST /mcp",
+          png_download: "GET /img/{id}.png",
+          base64_json: "GET /img/{id}.png?format=b64",
+        },
       });
     }
 
