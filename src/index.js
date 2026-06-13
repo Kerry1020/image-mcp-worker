@@ -1,10 +1,11 @@
 // image-mcp-worker — Standard MCP Protocol (Streamable HTTP / JSON-RPC 2.0)
 // Tools: generate_image (via 987xyz gpt-image-2)
+// Image storage: CF KV (1h TTL) with direct download URLs
 
 const TOOL_DEFINITIONS = [
   {
     name: "generate_image",
-    description: "Generate an image from a text prompt. Returns base64 PNG. Keep prompts short and natural.",
+    description: "Generate an image from a text prompt. Returns a direct PNG download URL (valid 1 hour) plus base64. Keep prompts short and natural.",
     inputSchema: {
       type: "object",
       properties: {
@@ -50,7 +51,7 @@ async function handleInitialize(id) {
       capabilities: { tools: {} },
       serverInfo: {
         name: "image-mcp",
-        version: "1.0.0",
+        version: "2.0.0",
       },
     },
   });
@@ -62,6 +63,18 @@ async function handleToolsList(id) {
     id,
     result: { tools: TOOL_DEFINITIONS },
   });
+}
+
+// Generate a short random ID for the image
+function generateId() {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let id = "";
+  const arr = new Uint8Array(8);
+  crypto.getRandomValues(arr);
+  for (let i = 0; i < 8; i++) {
+    id += chars[arr[i] % chars.length];
+  }
+  return id;
 }
 
 async function handleToolsCall(id, params, env) {
@@ -95,19 +108,31 @@ async function handleToolsCall(id, params, env) {
       const data = await resp.json();
 
       if (data.data?.[0]?.b64_json) {
+        const b64 = data.data[0].b64_json;
+        const revised = data.data[0].revised_prompt || prompt;
+        const imgId = generateId();
+        const baseUrl = `https://image.qdp.qzz.io`;
+
+        // Store in KV with 1h TTL
+        if (env.IMAGE_KV) {
+          await env.IMAGE_KV.put(imgId, b64, { expirationTtl: 3600 });
+        }
+
+        const downloadUrl = `${baseUrl}/img/${imgId}.png`;
+
         return jsonResponse({
           jsonrpc: "2.0",
           id,
           result: {
             content: [
               {
-                type: "image",
-                data: data.data[0].b64_json,
-                mimeType: "image/png",
+                type: "text",
+                text: `✅ Image generated (${size})\n\nRevised prompt: ${revised}\n\nDownload URL: ${downloadUrl}\n\nDirect link valid for 1 hour.`,
               },
               {
-                type: "text",
-                text: `Image generated (${size}). Revised prompt: ${data.data[0].revised_prompt || prompt}`,
+                type: "image",
+                data: b64,
+                mimeType: "image/png",
               },
             ],
           },
@@ -138,14 +163,47 @@ export default {
       });
     }
 
+    // Serve image by ID — direct PNG download
+    if (req.method === "GET" && url.pathname.startsWith("/img/")) {
+      const match = url.pathname.match(/^\/img\/([a-z0-9]+)\.png$/);
+      if (!match) {
+        return jsonResponse({ error: "invalid image URL format" }, 404);
+      }
+      const imgId = match[1];
+      if (!env.IMAGE_KV) {
+        return jsonResponse({ error: "KV not configured" }, 500);
+      }
+      const b64 = await env.IMAGE_KV.get(imgId);
+      if (!b64) {
+        return jsonResponse({ error: "image not found or expired" }, 404);
+      }
+
+      // Decode base64 to binary
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+
+      return new Response(bytes, {
+        headers: {
+          "Content-Type": "image/png",
+          "Cache-Control": "public, max-age=3600",
+          "Content-Disposition": `inline; filename="${imgId}.png"`,
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    }
+
     // Health check
     if (req.method === "GET" && url.pathname === "/health") {
       return jsonResponse({
         ok: true,
         name: "image-mcp-worker",
-        version: "1.0.0",
+        version: "2.0.0",
         tools: ["generate_image"],
         protocol: "MCP Streamable HTTP",
+        features: ["KV image storage with direct download URLs"],
       });
     }
 
@@ -191,8 +249,8 @@ export default {
     if (req.method === "GET" && url.pathname === "/") {
       return jsonResponse({
         name: "image-mcp",
-        version: "1.0.0",
-        description: "Generate images via gpt-image-2. MCP Streamable HTTP at /mcp",
+        version: "2.0.0",
+        description: "Generate images via gpt-image-2. MCP Streamable HTTP at /mcp. Direct PNG download at /img/{id}.png",
         tools: TOOL_DEFINITIONS,
         mcp_endpoint: "/mcp",
       });
@@ -217,7 +275,23 @@ export default {
 
         const data = await resp.json();
         if (data.data?.[0]?.b64_json) {
-          return jsonResponse({ result: { b64_json: data.data[0].b64_json, size, revised_prompt: data.data[0].revised_prompt || null } });
+          const b64 = data.data[0].b64_json;
+          const revised = data.data[0].revised_prompt || null;
+          const imgId = generateId();
+          const downloadUrl = `https://image.qdp.qzz.io/img/${imgId}.png`;
+
+          if (env.IMAGE_KV) {
+            await env.IMAGE_KV.put(imgId, b64, { expirationTtl: 3600 });
+          }
+
+          return jsonResponse({
+            result: {
+              download_url: downloadUrl,
+              b64_json: b64,
+              size,
+              revised_prompt: revised,
+            }
+          });
         }
         return jsonResponse({ error: "generation_failed", detail: JSON.stringify(data).slice(0, 500) }, 502);
       } catch (e) {
@@ -225,6 +299,6 @@ export default {
       }
     }
 
-    return jsonResponse({ error: "not_found", hint: "Use POST /mcp for MCP protocol or GET /health" }, 404);
+    return jsonResponse({ error: "not_found", hint: "Use POST /mcp for MCP protocol, GET /health, or GET /img/{id}.png for images" }, 404);
   },
 };
