@@ -1,111 +1,199 @@
 # image-mcp-worker
 
-Cloudflare Worker 上运行的 MCP (Model Context Protocol) 图像生成服务，通过 OpenAI 兼容网关调用 `gpt-image-2` 模型。
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) compatible image generation worker that runs on Cloudflare Workers. Generate images from text prompts with direct download URLs and base64 support.
 
-## 协议
+## Features
 
-标准 MCP Streamable HTTP / JSON-RPC 2.0。无需认证 header（公开端点）。MCP 端点为 `/mcp`，所有请求为 `POST` + `Content-Type: application/json`。
+- **MCP Protocol** — Streamable HTTP / JSON-RPC 2.0, works with any MCP client
+- **Bring Your Own Provider** — Pass any OpenAI-compatible image API via headers or env vars
+- **Direct Download URLs** — Generated images served as raw PNG via `/img/{id}.png`
+- **Base64 JSON** — Also available via `/img/{id}.png?format=b64`
+- **Cloudflare KV Storage** — Images cached 1 hour, auto-expiring
+- **Multi-tenant Ready** — Per-request header overrides for API key, base URL, and model
 
-## 工具
+## Quick Start
 
-### `generate_image`
+### Deploy to Cloudflare Workers
 
-从文本提示生成图像，返回 base64 PNG。
+1. Fork this repo
+2. Create a KV namespace:
+   ```bash
+   wrangler kv namespace create IMAGE_KV
+   ```
+3. Set your secrets:
+   ```bash
+   wrangler secret put API_KEY
+   wrangler secret put API_BASE_URL    # e.g. https://your-provider.com/v1
+   wrangler secret put MODEL           # optional, default: gpt-image-1
+   ```
+4. Deploy:
+   ```bash
+   wrangler deploy
+   ```
 
-**参数：**
+### Configuration
 
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `prompt` | string | ✅ | 自然语言图像描述 |
-| `size` | string | ❌ | 输出尺寸，默认 `1024x1024`。可选：`1024x1024`、`1024x1536`、`1536x1024` |
+All config can be set via **env vars** (deployment-level) or **request headers** (per-request override):
 
-**返回：**
+| Env Var | Header | Required | Default | Description |
+|---|---|---|---|---|
+| `API_KEY` | `X-API-Key` | ✅ | — | API key for your image provider |
+| `API_BASE_URL` | `X-API-Base-URL` | ✅ | — | Provider base URL (e.g. `https://api.example.com/v1`) |
+| `MODEL` | `X-Model` | ❌ | `gpt-image-1` | Model name |
 
-`content` 数组包含：
-- `{ type: "image", data: "<base64>", mimeType: "image/png" }` — PNG 图片 base64
-- `{ type: "text", text: "Image generated (...). Revised prompt: ..." }` — 元信息
+**Priority: header > env var > default**
 
-## 接口示例
+This means you can deploy with env vars for your own use, and also let other users pass their own credentials via headers.
 
-### MCP JSON-RPC
+## API Endpoints
+
+### `POST /mcp` — MCP Protocol
+
+Standard MCP Streamable HTTP endpoint. Supports `initialize`, `tools/list`, `tools/call`, `ping`.
+
+**Tool: `generate_image`**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "generate_image",
+    "arguments": {
+      "prompt": "A samurai cat in a neon-lit cyberpunk city",
+      "size": "1024x1024"
+    }
+  }
+}
+```
+
+Response includes both a download URL and inline base64:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "✅ Image generated (1024x1024, gpt-image-1)\n\nDownload URL: https://your-worker.example.com/img/abc123.png\n\nDirect link valid for 1 hour.\nBase64 JSON: https://your-worker.example.com/img/abc123.png?format=b64"
+      },
+      {
+        "type": "image",
+        "data": "iVBORw0KGgo...",
+        "mimeType": "image/png"
+      }
+    ]
+  }
+}
+```
+
+**With per-request headers (multi-tenant):**
 
 ```bash
-curl -X POST <YOUR_WORKER_URL>/mcp \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "tools/call",
-    "params": {
-      "name": "generate_image",
-      "arguments": {
-        "prompt": "a cat on a windowsill",
-        "size": "1024x1024"
+curl -X POST https://your-worker.example.com/mcp \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: sk-your-key" \
+  -H "X-API-Base-URL: https://your-provider.com/v1" \
+  -H "X-Model: dall-e-3" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"generate_image","arguments":{"prompt":"sunset over mountains"}}}'
+```
+
+### `GET /img/{id}.png` — Direct PNG Download
+
+Returns raw PNG binary. Valid for 1 hour after generation.
+
+```bash
+curl -o image.png https://your-worker.example.com/img/abc123.png
+```
+
+### `GET /img/{id}.png?format=b64` — Base64 JSON
+
+Returns base64-encoded image as JSON:
+
+```json
+{
+  "id": "abc123",
+  "mime_type": "image/png",
+  "data": "iVBORw0KGgo..."
+}
+```
+
+### `POST /tools/generate_image` — REST Endpoint (Legacy)
+
+Non-MCP REST interface for simple integrations:
+
+```bash
+curl -X POST https://your-worker.example.com/tools/generate_image \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: sk-your-key" \
+  -H "X-API-Base-URL: https://your-provider.com/v1" \
+  -d '{"prompt":"a red panda eating bamboo","size":"1024x1024"}'
+```
+
+### `GET /health` — Health Check
+
+```json
+{
+  "ok": true,
+  "name": "image-mcp-worker",
+  "version": "3.0.0",
+  "tools": ["generate_image"],
+  "protocol": "MCP Streamable HTTP",
+  "endpoints": { ... }
+}
+```
+
+## Connect to MCP Clients
+
+### Claude Desktop / Claude Code
+
+Add to your MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "image-gen": {
+      "url": "https://your-worker.example.com/mcp",
+      "headers": {
+        "X-API-Key": "sk-your-key",
+        "X-API-Base-URL": "https://your-provider.com/v1"
       }
     }
-  }'
+  }
+}
 ```
 
-### 初始化握手
+### Hermes Agent
 
 ```bash
-curl -X POST <YOUR_WORKER_URL>/mcp \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "initialize"
-  }'
+hermes mcp add image-gen --transport http --url https://your-worker.example.com/mcp \
+  --header "X-API-Key: sk-your-key" \
+  --header "X-API-Base-URL: https://your-provider.com/v1"
 ```
 
-### 工具列表
+## Supported Sizes
 
-```bash
-curl -X POST <YOUR_WORKER_URL>/mcp \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "tools/list"
-  }'
-```
+| Size | Aspect Ratio |
+|---|---|
+| `1024x1024` | 1:1 (default) |
+| `1024x1536` | 2:3 (portrait) |
+| `1536x1024` | 3:2 (landscape) |
+| `auto` | Provider decides |
 
-### 健康检查
+## Cloudflare KV Free Tier Limits
 
-```bash
-curl <YOUR_WORKER_URL>/health
-```
+| Resource | Free Limit |
+|---|---|
+| Reads | 100,000 / day |
+| **Writes** | **1,000 / day** (limits daily image generations) |
+| Storage | 1 GB |
+| List operations | 1,000 / day |
 
-### Legacy REST（向后兼容）
+Images auto-expire after 1 hour via TTL, so storage is self-cleaning.
 
-```bash
-curl -X POST <YOUR_WORKER_URL>/tools/generate_image \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt": "a cat", "size": "1024x1024"}'
-```
-
-## 支持的 MCP 方法
-
-| 方法 | 说明 |
-|------|------|
-| `initialize` | MCP 握手，返回 serverInfo + protocolVersion |
-| `notifications/initialized` | 客户端通知，返回空结果 |
-| `ping` | 心跳 |
-| `tools/list` | 返回工具定义 |
-| `tools/call` | 调用工具 |
-
-## 环境变量
-
-| 变量 | 说明 |
-|------|------|
-| `API_KEY` | 上游图像生成 API Key（在 CF Worker Settings → Secrets 中配置） |
-
-## 部署
-
-```bash
-npx wrangler deploy
-```
-
-## 许可
+## License
 
 MIT
