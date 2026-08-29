@@ -190,7 +190,7 @@ async function handleToolsCall(id, params, req, env) {
         content: [
           {
             type: "text",
-            text: `✅ Image generated (${size}, ${cfg.model})\n\nRevised prompt: ${revised}\n\nDownload URL: ${downloadUrl}\n\nDirect link valid for 1 hour.\nBase64 JSON: ${downloadUrl}?format=b64`,
+            text: `Image generated (${size}, ${cfg.model})\n\nRevised prompt: ${revised}\n\nDownload URL: ${downloadUrl}\n\nDirect link valid for 1 hour.\nBase64 JSON: ${downloadUrl}?format=b64`,
           },
           { type: "image", data: b64, mimeType: "image/png" },
         ],

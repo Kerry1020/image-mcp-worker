@@ -8,7 +8,7 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) compatible i
 - **Bring Your Own Provider** — Pass any OpenAI-compatible image API via headers or env vars
 - **Direct Download URLs** — Generated images served as raw PNG via `/img/{id}.png`
 - **Base64 JSON** — Also available via `/img/{id}.png?format=b64`
-- **Cloudflare KV Storage (optional)** — Images cached 1 hour, auto-expiring. Requires creating an `IMAGE_KV` namespace and adding the binding to `wrangler.toml`; without it, every request regenerates and download URLs return 404.
+- **Cloudflare KV Storage (optional)** — Images cached 1 hour, auto-expiring. Requires creating an `IMAGE_KV` namespace and adding the binding to `wrangler.toml`; without it, every request regenerates and download URLs return 500 (`KV not configured`). With the binding in place, expired images return 404.
 - **Multi-tenant Ready** — Per-request header overrides for API key, base URL, and model
 
 ## Quick Start
@@ -83,7 +83,7 @@ Response includes both a download URL and inline base64:
     "content": [
       {
         "type": "text",
-        "text": "✅ Image generated (1024x1024, gpt-image-1)\n\nDownload URL: https://your-worker.example.com/img/abc123.png\n\nDirect link valid for 1 hour.\nBase64 JSON: https://your-worker.example.com/img/abc123.png?format=b64"
+        "text": "Image generated (1024x1024, gpt-image-1)\n\nDownload URL: https://your-worker.example.com/img/abc123.png\n\nDirect link valid for 1 hour.\nBase64 JSON: https://your-worker.example.com/img/abc123.png?format=b64"
       },
       {
         "type": "image",
