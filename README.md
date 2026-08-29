@@ -8,7 +8,7 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) compatible i
 - **Bring Your Own Provider** — Pass any OpenAI-compatible image API via headers or env vars
 - **Direct Download URLs** — Generated images served as raw PNG via `/img/{id}.png`
 - **Base64 JSON** — Also available via `/img/{id}.png?format=b64`
-- **Cloudflare KV Storage** — Images cached 1 hour, auto-expiring
+- **Cloudflare KV Storage (optional)** — Images cached 1 hour, auto-expiring. Requires creating an `IMAGE_KV` namespace and adding the binding to `wrangler.toml`; without it, every request regenerates and download URLs return 404.
 - **Multi-tenant Ready** — Per-request header overrides for API key, base URL, and model
 
 ## Quick Start
@@ -16,9 +16,14 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) compatible i
 ### Deploy to Cloudflare Workers
 
 1. Fork this repo
-2. Create a KV namespace:
+2. Create a KV namespace and **add the binding to `wrangler.toml`** (the repo's `wrangler.toml` ships without it):
    ```bash
    wrangler kv namespace create IMAGE_KV
+   ```
+   ```toml
+   [[kv_namespaces]]
+   binding = "IMAGE_KV"
+   id = "<the id from the create command>"
    ```
 3. Set your secrets:
    ```bash
@@ -37,9 +42,9 @@ All config can be set via **env vars** (deployment-level) or **request headers**
 
 | Env Var | Header | Required | Default | Description |
 |---|---|---|---|---|
-| `API_KEY` | `X-API-Key` | ✅ | — | API key for your image provider |
-| `API_BASE_URL` | `X-API-Base-URL` | ✅ | — | Provider base URL (e.g. `https://api.example.com/v1`) |
-| `MODEL` | `X-Model` | ❌ | `gpt-image-1` | Model name |
+| `API_KEY` | `X-API-Key` | yes | — | API key for your image provider |
+| `API_BASE_URL` | `X-API-Base-URL` | yes | — | Provider base URL (e.g. `https://api.example.com/v1`) |
+| `MODEL` | `X-Model` | no | `gpt-image-1` | Model name |
 
 **Priority: header > env var > default**
 
