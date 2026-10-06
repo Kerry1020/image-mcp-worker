@@ -1,205 +1,198 @@
 # image-mcp-worker
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) compatible image generation worker that runs on Cloudflare Workers. Generate images from text prompts with direct download URLs and base64 support.
+[![CI](https://github.com/Kerry1020/image-mcp-worker/actions/workflows/ci.yml/badge.svg)](https://github.com/Kerry1020/image-mcp-worker/actions/workflows/ci.yml)
+
+English | [简体中文](README.zh-CN.md)
+
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) image generation server that runs on Cloudflare Workers. It forwards prompts to any OpenAI-compatible `POST /images/generations` API (e.g. `gpt-image-1`) and returns the image inline as base64 plus an optional direct download URL.
 
 ## Features
 
-- **MCP Protocol** — Streamable HTTP / JSON-RPC 2.0, works with any MCP client
-- **Bring Your Own Provider** — Pass any OpenAI-compatible image API via headers or env vars
-- **Direct Download URLs** — Generated images served as raw PNG via `/img/{id}.png`
-- **Base64 JSON** — Also available via `/img/{id}.png?format=b64`
-- **Cloudflare KV Storage (optional)** — Images cached 1 hour, auto-expiring. Requires creating an `IMAGE_KV` namespace and adding the binding to `wrangler.toml`; without it, every request regenerates and download URLs return 500 (`KV not configured`). With the binding in place, expired images return 404.
-- **Multi-tenant Ready** — Per-request header overrides for API key, base URL, and model
+- **MCP over Streamable HTTP** (JSON-RPC 2.0) at `POST /mcp`: `initialize`, `ping`, `tools/list`, `tools/call`, notifications and batches. Stateless, JSON responses only.
+- **Bring your own provider**: configure the provider with env vars, or per request with headers (multi-tenant).
+- **Direct download URLs** via optional Cloudflare KV (`/img/{id}.png`, `?format=b64`), auto-expiring.
+- **Safe by default**: the deployment's own `API_KEY` is only ever sent to its own `API_BASE_URL`; caller-supplied base URLs must be public `https` hosts and must come with the caller's own key. Optional bearer auth (`MCP_AUTH_TOKEN`).
+- **Robust upstream handling**: timeout, clear errors for non-JSON / non-2xx / redirect responses, API key redacted from error messages, KV failures never lose a generated image.
 
-## Quick Start
+## MCP tool
 
-### Deploy to Cloudflare Workers
+| Tool | Arguments | Description |
+|------|-----------|-------------|
+| `generate_image` | `prompt` (string, required, up to 32000 chars), `size` (`1024x1024` default, `1024x1536`, `1536x1024`, `auto`), `model` (optional override) | Generates one image. Returns a text block (size, model, revised prompt, download URL when KV is bound) and an `image` content block with base64 data. |
 
-1. Fork this repo
-2. Create a KV namespace and **add the binding to `wrangler.toml`** (the repo's `wrangler.toml` ships without it):
+Unknown `size` values fall back to `1024x1024`.
+
+**Errors:** a missing/invalid `prompt` or `model`, missing provider config, or a disallowed `X-API-Base-URL` returns JSON-RPC error `-32602`. Provider failures (HTTP errors, timeouts, bad responses) return a normal result with `isError: true` and the reason in the text content.
+
+## HTTP endpoints
+
+| Method | Path | Auth* | Description |
+|--------|------|-------|-------------|
+| `POST` | `/mcp` | yes | MCP JSON-RPC endpoint |
+| `POST` | `/tools/generate_image` | yes | Legacy REST endpoint: `{prompt, size?, model?}` -> `{result: {download_url, b64_json, size, model, revised_prompt}}` |
+| `GET` | `/img/{id}.png` | no | Stored image bytes (needs `IMAGE_KV`) |
+| `GET` | `/img/{id}.png?format=b64` | no | `{id, mime_type, data}` |
+| `GET` | `/health` | no | Health check |
+| `GET` | `/` | no | Service info and tool schema |
+
+\* Only when `MCP_AUTH_TOKEN` is set. Image URLs stay public so they can be shared; ids are 16 random characters.
+
+`GET /mcp` returns `405` (no SSE stream). Without `IMAGE_KV`, `/img/*` returns `500 KV not configured` and generation responses contain no download URL. Expired images return `404`.
+
+## Configuration
+
+Provider settings can come from env vars (deployment-level) or request headers (per request). **Priority: header > env var > default.** For `model`, the tool argument wins over both.
+
+| Env var | Header | Required | Default | Description |
+|---|---|---|---|---|
+| `API_KEY` (secret) | `X-API-Key` | yes | — | Provider API key |
+| `API_BASE_URL` (secret or var) | `X-API-Base-URL` | yes | — | Provider base URL, e.g. `https://api.openai.com/v1` |
+| `MODEL` | `X-Model` | no | `gpt-image-1` | Model name |
+
+If `X-API-Base-URL` differs from `API_BASE_URL`, the request **must** also send `X-API-Key`, and the URL must be `https` on a public host. This prevents callers from redirecting the operator's key to a server they control.
+
+Other optional settings:
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `MCP_AUTH_TOKEN` | secret | unset | Require `Authorization: Bearer <token>` on `/mcp` and `/tools/*`. **Strongly recommended when `API_KEY` is set**, otherwise anyone who finds the URL can spend your provider credits. |
+| `ALLOW_HEADER_CONFIG` | var | `true` | Set `false` to ignore `X-API-Key` / `X-API-Base-URL` (single-tenant mode). `X-Model` still applies. |
+| `CORS_ALLOW_ORIGIN` | var | `*` | `*` or comma-separated origin allow-list. |
+| `UPSTREAM_TIMEOUT_MS` | var | `120000` | Provider request timeout (5000-600000). |
+| `IMAGE_TTL_SECONDS` | var | `3600` | How long images stay in KV (60 s - 30 days). |
+| `IMAGE_KV` | KV binding | unset | Enables download URLs. |
+
+## Deploy to Cloudflare Workers
+
+1. Fork/clone the repo and `npm install`.
+2. (Optional) create a KV namespace and uncomment the `[[kv_namespaces]]` block in `wrangler.toml` with the returned id:
    ```bash
-   wrangler kv namespace create IMAGE_KV
+   npx wrangler kv namespace create IMAGE_KV
    ```
-   ```toml
-   [[kv_namespaces]]
-   binding = "IMAGE_KV"
-   id = "<the id from the create command>"
-   ```
-3. Set your secrets:
+3. Set secrets:
    ```bash
-   wrangler secret put API_KEY
-   wrangler secret put API_BASE_URL    # e.g. https://your-provider.com/v1
-   wrangler secret put MODEL           # optional, default: gpt-image-1
+   npx wrangler secret put API_KEY
+   npx wrangler secret put API_BASE_URL     # e.g. https://api.openai.com/v1
+   npx wrangler secret put MCP_AUTH_TOKEN   # recommended
    ```
 4. Deploy:
    ```bash
-   wrangler deploy
+   npx wrangler deploy
    ```
 
-### Configuration
+## Connect MCP clients
 
-All config can be set via **env vars** (deployment-level) or **request headers** (per-request override):
-
-| Env Var | Header | Required | Default | Description |
-|---|---|---|---|---|
-| `API_KEY` | `X-API-Key` | yes | — | API key for your image provider |
-| `API_BASE_URL` | `X-API-Base-URL` | yes | — | Provider base URL (e.g. `https://api.example.com/v1`) |
-| `MODEL` | `X-Model` | no | `gpt-image-1` | Model name |
-
-**Priority: header > env var > default**
-
-This means you can deploy with env vars for your own use, and also let other users pass their own credentials via headers.
-
-## API Endpoints
-
-### `POST /mcp` — MCP Protocol
-
-Standard MCP Streamable HTTP endpoint. Supports `initialize`, `tools/list`, `tools/call`, `ping`.
-
-**Tool: `generate_image`**
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "tools/call",
-  "params": {
-    "name": "generate_image",
-    "arguments": {
-      "prompt": "A samurai cat in a neon-lit cyberpunk city",
-      "size": "1024x1024"
-    }
-  }
-}
-```
-
-Response includes both a download URL and inline base64:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "content": [
-      {
-        "type": "text",
-        "text": "Image generated (1024x1024, gpt-image-1)\n\nDownload URL: https://your-worker.example.com/img/abc123.png\n\nDirect link valid for 1 hour.\nBase64 JSON: https://your-worker.example.com/img/abc123.png?format=b64"
-      },
-      {
-        "type": "image",
-        "data": "iVBORw0KGgo...",
-        "mimeType": "image/png"
-      }
-    ]
-  }
-}
-```
-
-**With per-request headers (multi-tenant):**
+Claude Code:
 
 ```bash
-curl -X POST https://your-worker.example.com/mcp \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: sk-your-key" \
-  -H "X-API-Base-URL: https://your-provider.com/v1" \
-  -H "X-Model: dall-e-3" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"generate_image","arguments":{"prompt":"sunset over mountains"}}}'
+claude mcp add --transport http image-gen https://image-mcp-worker.<your-subdomain>.workers.dev/mcp \
+  --header "Authorization: Bearer $MCP_AUTH_TOKEN"
 ```
 
-### `GET /img/{id}.png` — Direct PNG Download
-
-Returns raw PNG binary. Valid for 1 hour after generation.
-
-```bash
-curl -o image.png https://your-worker.example.com/img/abc123.png
-```
-
-### `GET /img/{id}.png?format=b64` — Base64 JSON
-
-Returns base64-encoded image as JSON:
-
-```json
-{
-  "id": "abc123",
-  "mime_type": "image/png",
-  "data": "iVBORw0KGgo..."
-}
-```
-
-### `POST /tools/generate_image` — REST Endpoint (Legacy)
-
-Non-MCP REST interface for simple integrations:
-
-```bash
-curl -X POST https://your-worker.example.com/tools/generate_image \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: sk-your-key" \
-  -H "X-API-Base-URL: https://your-provider.com/v1" \
-  -d '{"prompt":"a red panda eating bamboo","size":"1024x1024"}'
-```
-
-### `GET /health` — Health Check
-
-```json
-{
-  "ok": true,
-  "name": "image-mcp-worker",
-  "version": "3.0.0",
-  "tools": ["generate_image"],
-  "protocol": "MCP Streamable HTTP",
-  "endpoints": { ... }
-}
-```
-
-## Connect to MCP Clients
-
-### Claude Desktop / Claude Code
-
-Add to your MCP client config:
+JSON config (Claude Desktop remote connector, Cursor, etc.). Provider headers are only needed when you bring your own provider:
 
 ```json
 {
   "mcpServers": {
     "image-gen": {
-      "url": "https://your-worker.example.com/mcp",
+      "url": "https://image-mcp-worker.<your-subdomain>.workers.dev/mcp",
       "headers": {
+        "Authorization": "Bearer <MCP_AUTH_TOKEN>",
         "X-API-Key": "sk-your-key",
-        "X-API-Base-URL": "https://your-provider.com/v1"
+        "X-API-Base-URL": "https://your-provider.example.com/v1"
       }
     }
   }
 }
 ```
 
-### Hermes Agent
+Hermes Agent:
 
 ```bash
-hermes mcp add image-gen --transport http --url https://your-worker.example.com/mcp \
-  --header "X-API-Key: sk-your-key" \
-  --header "X-API-Base-URL: https://your-provider.com/v1"
+hermes mcp add image-gen --transport http --url https://image-mcp-worker.<your-subdomain>.workers.dev/mcp \
+  --header "Authorization: Bearer <MCP_AUTH_TOKEN>"
 ```
 
-## Supported Sizes
+## curl examples
 
-| Size | Aspect Ratio |
-|---|---|
-| `1024x1024` | 1:1 (default) |
-| `1024x1536` | 2:3 (portrait) |
-| `1536x1024` | 3:2 (landscape) |
-| `auto` | Provider decides |
+```bash
+URL=http://localhost:8787   # or your deployed worker
+AUTH=(-H "Authorization: Bearer $MCP_AUTH_TOKEN")   # or AUTH=() if auth is disabled
 
-## Cloudflare KV Free Tier Limits
+curl -s $URL/health
 
-| Resource | Free Limit |
+curl -s $URL/mcp "${AUTH[@]}" -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+curl -s $URL/mcp "${AUTH[@]}" -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"generate_image","arguments":{"prompt":"A samurai cat in a neon-lit cyberpunk city","size":"1024x1024"}}}'
+
+# Bring your own provider (multi-tenant)
+curl -s $URL/mcp "${AUTH[@]}" -H 'content-type: application/json' \
+  -H "X-API-Key: sk-your-key" \
+  -H "X-API-Base-URL: https://your-provider.example.com/v1" \
+  -H "X-Model: gpt-image-1" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"generate_image","arguments":{"prompt":"sunset over mountains"}}}'
+
+# Legacy REST endpoint
+curl -s -X POST $URL/tools/generate_image "${AUTH[@]}" -H 'content-type: application/json' \
+  -d '{"prompt":"a red panda eating bamboo","size":"1024x1024"}'
+
+# Download a stored image
+curl -o image.png $URL/img/<id>.png
+```
+
+Example `tools/call` result:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Image generated (1024x1024, gpt-image-1)\n\nRevised prompt: ...\n\nDownload URL: https://your-worker.example.com/img/abcd1234efgh5678.png\n\nDirect link valid for 1 hour.\nBase64 JSON: https://your-worker.example.com/img/abcd1234efgh5678.png?format=b64"
+      },
+      { "type": "image", "data": "iVBORw0KGgo...", "mimeType": "image/png" }
+    ]
+  }
+}
+```
+
+## Development
+
+Requires Node.js 20+.
+
+```bash
+npm install
+cp .dev.vars.example .dev.vars   # fill in, git-ignored
+npm test                          # node:test, fetch and KV mocked
+npm run dev                       # wrangler dev
+npm run check                     # bundle dry-run, does not deploy
+```
+
+## Cloudflare KV free tier
+
+| Resource | Free limit |
 |---|---|
 | Reads | 100,000 / day |
-| **Writes** | **1,000 / day** (limits daily image generations) |
+| **Writes** | **1,000 / day** (one per generated image) |
 | Storage | 1 GB |
-| List operations | 1,000 / day |
 
-Images auto-expire after 1 hour via TTL, so storage is self-cleaning.
+When the write quota is exhausted the image is still returned inline, just without a download URL.
 
+## Project structure
+
+```
+src/
+  index.js       Worker entry, routing, tool, REST and image endpoints
+  provider.js    Provider config resolution and upstream call
+  mcp.js         JSON-RPC / MCP protocol, CORS, bearer auth
+  url-guard.js   SSRF host/IP validation for caller-supplied base URLs
+test/            node:test suites
+```
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0 — see the [LICENSE](LICENSE) file for details.
+GNU General Public License v3.0, see [LICENSE](LICENSE).
