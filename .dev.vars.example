@@ -1,0 +1,5 @@
+# Copy to .dev.vars for `wrangler dev` (never commit .dev.vars).
+# API_KEY=sk-...
+# API_BASE_URL=https://api.openai.com/v1
+# MODEL=gpt-image-1
+# MCP_AUTH_TOKEN=change-me

@@ -1,1 +1,22 @@
-{"name":"image-mcp-worker","version":"1.0.0","private":true}
+{
+  "name": "image-mcp-worker",
+  "version": "3.1.0",
+  "description": "Cloudflare Worker MCP server for image generation via any OpenAI-compatible images API",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "wrangler deploy --dry-run --outdir dist",
+    "test": "node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "wrangler": "^4.81.0"
+  }
+}

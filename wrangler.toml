@@ -1,3 +1,24 @@
 name = "image-mcp-worker"
 main = "src/index.js"
 compatibility_date = "2026-06-10"
+
+[observability]
+enabled = true
+
+# Secrets (never commit them here):
+#   wrangler secret put API_KEY
+#   wrangler secret put API_BASE_URL
+#   wrangler secret put MCP_AUTH_TOKEN   # optional, recommended when API_KEY is set
+[vars]
+# MODEL = "gpt-image-1"
+# ALLOW_HEADER_CONFIG = "true"
+# CORS_ALLOW_ORIGIN = "*"
+# UPSTREAM_TIMEOUT_MS = "120000"
+# IMAGE_TTL_SECONDS = "3600"
+
+# Optional KV storage for download URLs. Create with
+#   wrangler kv namespace create IMAGE_KV
+# then uncomment and paste the id:
+# [[kv_namespaces]]
+# binding = "IMAGE_KV"
+# id = "<namespace-id>"
